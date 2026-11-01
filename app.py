@@ -78,4 +78,7 @@ if st.button("Analyse"):
                 )
                 st.markdown(resp.choices[0].message.content)
             except Exception as e:
-                st.error(f"Analysis failed: {type(e).__name__}")
+                   except Exception as e:
+       code = getattr(getattr(e, "response", None), "status_code", "unknown")
+       st.error(f"Analysis failed: {type(e).__name__} (status {code})")
+       st.caption(str(e)[:300])
