@@ -1,19 +1,19 @@
 import os
+import io
+import base64
 import streamlit as st
-from pypdf import PdfReader
-from huggingface_hub import InferenceClient
+from pypdf import PdfReader, PdfWriter
+from google import genai
 
-MODEL = "Qwen/Qwen2.5-72B-Instruct"
-MAX_CHARS = 24000
+MODEL = "gemini-3.5-flash"   # change if Google says the model is unavailable
 
 try:
-    HF_TOKEN = st.secrets["HF_TOKEN"]
+    API_KEY = st.secrets["GEMINI_API_KEY"]
 except Exception:
-    HF_TOKEN = os.environ.get("HF_TOKEN")
+    API_KEY = os.environ.get("GEMINI_API_KEY")
 
 PROMPT = """You are a senior analyst writing a daily briefing for an Indian reader.
-Below is raw text extracted from pages of the newspaper "{paper}". The text is
-messy (columns, ads, captions may be mixed together).
+The attached PDF contains pages from the newspaper "{paper}".
 
 Task:
 1. Pick the {n} most important stories. Prioritise India (policy, economy,
@@ -26,13 +26,22 @@ Task:
    **Impacts:** likely consequences, especially for India
    **Bigger picture:** how it connects to larger trends
 
-Rules: use only facts present in the text plus well-established background.
-Do not invent facts, quotes or numbers. If the text for a story is unclear
-or cut off, say so briefly.
-
-NEWSPAPER TEXT:
-{text}
+Rules: use only facts present in the pages plus well-established background.
+Do not invent facts, quotes or numbers. If a story is unclear or cut off,
+say so briefly.
 """
+
+
+def slice_pdf(file, start, end):
+    reader = PdfReader(file)
+    last = min(len(reader.pages), end)
+    writer = PdfWriter()
+    for i in range(start - 1, last):
+        writer.add_page(reader.pages[i])
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
 
 st.set_page_config(page_title="Deep News", page_icon="📰")
 st.title("📰 Deep News")
@@ -46,38 +55,36 @@ end = col2.number_input("To page", min_value=1, value=6, step=1)
 n = st.slider("Number of stories", 3, 8, 6)
 
 if st.button("Analyse"):
-    if not HF_TOKEN:
-        st.error("HF_TOKEN secret is missing.")
+    if not API_KEY:
+        st.error("GEMINI_API_KEY secret is missing.")
     elif file is None:
         st.warning("Please upload a PDF first.")
     else:
         with st.spinner("Reading and analysing..."):
             try:
-                reader = PdfReader(file)
-                last = min(len(reader.pages), int(end))
-                parts = []
-                for i in range(int(start) - 1, last):
-                    parts.append(f"[Page {i + 1}]\n" + (reader.pages[i].extract_text() or ""))
-                text = "\n\n".join(parts)
+                pdf_bytes = slice_pdf(file, int(start), int(end))
             except Exception:
                 st.error("Could not read this PDF.")
                 st.stop()
 
-            if len(text.strip()) < 500:
-                st.error("Almost no text found. This PDF may be scanned images.")
+            if len(pdf_bytes) > 18 * 1024 * 1024:
+                st.error("These pages are too large. Try fewer pages.")
                 st.stop()
 
             try:
-                client = InferenceClient(token=HF_TOKEN)
-                resp = client.chat_completion(
+                client = genai.Client(api_key=API_KEY)
+                interaction = client.interactions.create(
                     model=MODEL,
-                    messages=[{"role": "user", "content": PROMPT.format(
-                        paper=paper, n=n, text=text[:MAX_CHARS])}],
-                    max_tokens=3000,
-                    temperature=0.4,
+                    input=[
+                        {
+                            "type": "document",
+                            "data": base64.b64encode(pdf_bytes).decode("utf-8"),
+                            "mime_type": "application/pdf",
+                        },
+                        {"type": "text", "text": PROMPT.format(paper=paper, n=n)},
+                    ],
                 )
-                st.markdown(resp.choices[0].message.content)
+                st.markdown(interaction.output_text)
             except Exception as e:
-                code = getattr(getattr(e, "response", None), "status_code", "unknown")
-                st.error(f"Analysis failed: {type(e).__name__} (status {code})")
+                st.error(f"Analysis failed: {type(e).__name__}")
                 st.caption(str(e)[:300])
