@@ -1,11 +1,12 @@
 import os
 import io
+import time
 import base64
 import streamlit as st
 from pypdf import PdfReader, PdfWriter
 from google import genai
 
-MODEL = "gemini-3.5-flash"   # change if Google says the model is unavailable
+MODELS = ["gemini-3.5-flash", "gemini-3.8-flash"]   # tried in this order
 
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
@@ -43,6 +44,34 @@ def slice_pdf(file, start, end):
     return buf.getvalue()
 
 
+def ask_gemini(pdf_bytes, prompt):
+    client = genai.Client(api_key=API_KEY)
+    last_error = None
+    for model in MODELS:
+        for attempt in range(3):
+            try:
+                interaction = client.interactions.create(
+                    model=model,
+                    input=[
+                        {
+                            "type": "document",
+                            "data": base64.b64encode(pdf_bytes).decode("utf-8"),
+                            "mime_type": "application/pdf",
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                )
+                return interaction.output_text
+            except Exception as e:
+                last_error = e
+                busy = any(x in str(e) for x in ["503", "429", "UNAVAILABLE"])
+                if busy:
+                    time.sleep(4 * (attempt + 1))   # wait, then retry
+                else:
+                    break                            # other error: next model
+    raise last_error
+
+
 st.set_page_config(page_title="Deep News", page_icon="📰")
 st.title("📰 Deep News")
 st.caption("Upload today's paper, get the analysis.")
@@ -72,19 +101,8 @@ if st.button("Analyse"):
                 st.stop()
 
             try:
-                client = genai.Client(api_key=API_KEY)
-                interaction = client.interactions.create(
-                    model=MODEL,
-                    input=[
-                        {
-                            "type": "document",
-                            "data": base64.b64encode(pdf_bytes).decode("utf-8"),
-                            "mime_type": "application/pdf",
-                        },
-                        {"type": "text", "text": PROMPT.format(paper=paper, n=n)},
-                    ],
-                )
-                st.markdown(interaction.output_text)
+                result = ask_gemini(pdf_bytes, PROMPT.format(paper=paper, n=n))
+                st.markdown(result)
             except Exception as e:
                 st.error(f"Analysis failed: {type(e).__name__}")
                 st.caption(str(e)[:300])
